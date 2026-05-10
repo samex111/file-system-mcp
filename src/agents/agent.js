@@ -1,31 +1,46 @@
 import dotenv from "dotenv";
+import OpenAI from "openai";
 
 import {
-  GoogleGenerativeAI
-} from "@google/generative-ai";
-
-import {
-  createMcpClient
+  createMcpClient,
 } from "./mcp-client.js";
-
 
 dotenv.config();
 
 
 // =========================
-// GEMINI SETUP
+// OPENAI COMPATIBLE CLIENT
 // =========================
 
-const genAI =
-  new GoogleGenerativeAI(
-    process.env.GEMINI_API_KEY
-  );
+const openai = new OpenAI({
+  apiKey:
+    process.env.NVIDIA_OPEN_AI_API_KEY,
 
-const model =
-  genAI.getGenerativeModel({
-    model: "gemini-flash-latest",
-  });
+  baseURL:
+    "https://integrate.api.nvidia.com/v1",
+});
 
+
+// =========================
+// CONFIG
+// =========================
+
+const MODEL =
+  "mistral-small-4-119b-2603";
+
+const SYSTEM_PROMPT = `
+You are a production-grade MCP filesystem agent.
+
+Rules:
+- Use tools whenever required
+- Never hallucinate tool outputs
+- Never output XML
+- Never output DSML
+- Never fake tool execution
+- Always wait for real tool results
+- Keep responses concise
+- Use multiple tools if necessary
+`;
 
 
 // =========================
@@ -46,8 +61,6 @@ async function main() {
     } =
       await createMcpClient();
 
-
-
     console.log(
       "\nDiscovered tools:\n"
     );
@@ -59,226 +72,239 @@ async function main() {
     );
 
 
-
     // =========================
-    // CONVERT MCP TO GEMINI
+    // MCP -> OPENAI TOOLS
     // =========================
 
-    const geminiTools =
+    const openAITools =
       tools.tools.map(tool => ({
 
-        name: tool.name,
+        type: "function",
 
-        description:
-          tool.description || "",
+        function: {
+          name: tool.name,
 
-        parameters:
-          tool.inputSchema,
+          description:
+            tool.description || "",
+
+          parameters:
+            tool.inputSchema,
+        },
       }));
 
 
+    // =========================
+    // USER REQUEST
+    // =========================
 
     const userMessage =
-      "Create notes.txt with content Hello MCP";
-
-
-
-    // =========================
-    // FIRST LLM CALL
-    // =========================
-
-    const response =
-      await model.generateContent({
-
-        contents: [
-          {
-            role: "user",
-
-            parts: [
-              {
-                text: userMessage,
-              },
-            ],
-          },
-        ],
-
-        tools: [
-          {
-            functionDeclarations:
-              geminiTools,
-          },
-        ],
-      });
-
+      "create a file named test.txt with content 'Hello World' and then list all files";
 
 
     // =========================
-    // EXTRACT FUNCTION CALL
+    // CONVERSATION
     // =========================
 
-    const candidate =
-      response.response
-        .candidates?.[0];
+    const messages = [
 
+      {
+        role: "system",
 
-
-    if (!candidate) {
-      throw new Error(
-        "No candidate returned"
-      );
-    }
-
-
-
-    const parts =
-      candidate.content.parts;
-
-
-
-    const functionCall =
-      parts.find(
-        p => p.functionCall
-      )?.functionCall;
-
-
-
-    // =========================
-    // NO TOOL CALL
-    // =========================
-
-    if (!functionCall) {
-
-      console.log(
-        "\nNo tool call:\n"
-      );
-
-      console.log(
-        response.response.text()
-      );
-
-      return;
-    }
-
-
-
-    // =========================
-    // TOOL INFO
-    // =========================
-
-    const toolName =
-      functionCall.name;
-
-    const args =
-      functionCall.args;
-
-
-
-    console.log(
-      "\nExecuting Tool:",
-      toolName
-    );
-
-    console.log(
-      "Arguments:",
-      args
-    );
-
-
-
-    // =========================
-    // EXECUTE MCP TOOL
-    // =========================
-
-    const toolResult =
-      await client.callTool({
-
-        name: toolName,
-
-        arguments: args,
-      });
-
-
-
-    console.log(
-      "\nTool Result:\n"
-    );
-
-    console.log(toolResult);
-
-
-
-    // =========================
-    // SEND TOOL RESULT BACK
-    // =========================
-
-  const finalResponse =
-  await model.generateContent({
-
-    contents: [
+        content:
+          SYSTEM_PROMPT,
+      },
 
       {
         role: "user",
 
-        parts: [
-          {
-            text: userMessage,
-          },
-        ],
+        content:
+          userMessage,
       },
+    ];
 
-
-
-      // IMPORTANT
-      // reuse ORIGINAL model parts
-      {
-        role: "model",
-
-        parts,
-      },
-
-
-
-      {
-        role: "user",
-
-        parts: [
-          {
-            functionResponse: {
-
-              name: toolName,
-
-              response: {
-                result:
-                  toolResult,
-              },
-            },
-          },
-        ],
-      },
-    ],
-  });
 
     // =========================
-    // FINAL RESPONSE
+    // AGENT LOOP
     // =========================
 
-    console.log(
-      "\nFINAL RESPONSE:\n"
-    );
+    while (true) {
 
-    console.log(
-      finalResponse.response.text()
-    );
+      console.log(
+        "\n========================="
+      );
+
+      console.log(
+        "LLM THINKING..."
+      );
+
+      console.log(
+        "=========================\n"
+      );
+
+
+      const completion =
+        await openai.chat.completions.create({
+
+          model: MODEL,
+
+          messages,
+
+          tools:
+            openAITools,
+
+          tool_choice: "auto",
+
+          temperature: 0.2,
+
+          max_tokens: 4096,
+        });
+
+
+      const message =
+        completion
+          .choices[0]
+          .message;
+
+
+      // save assistant response
+      messages.push(message);
+
+
+      // =========================
+      // NO TOOL CALLS
+      // =========================
+
+      if (!message.tool_calls) {
+
+        console.log(
+          "\n========================="
+        );
+
+        console.log(
+          "FINAL RESPONSE"
+        );
+
+        console.log(
+          "=========================\n"
+        );
+
+        console.log(
+          message.content
+        );
+
+        break;
+      }
+
+
+      // =========================
+      // EXECUTE TOOL CALLS
+      // =========================
+
+      for (const toolCall of message.tool_calls) {
+
+        const toolName =
+          toolCall.function.name;
+
+        let args = {};
+
+        try {
+
+          args = JSON.parse(
+            toolCall
+              .function
+              .arguments
+          );
+
+        } catch {
+
+          console.error(
+            "\nInvalid JSON arguments"
+          );
+
+          continue;
+        }
+
+
+        console.log(
+          "\n========================="
+        );
+
+        console.log(
+          `EXECUTING TOOL: ${toolName}`
+        );
+
+        console.log(
+          "=========================\n"
+        );
+
+        console.log(
+          "Arguments:"
+        );
+
+        console.log(args);
+
+
+        // =========================
+        // EXECUTE MCP TOOL
+        // =========================
+
+        const toolResult =
+          await client.callTool({
+
+            name: toolName,
+
+            arguments: args,
+          });
+
+
+        console.log(
+          "\nTool Result:\n"
+        );
+
+        console.log(
+          JSON.stringify(
+            toolResult,
+            null,
+            2
+          )
+        );
+
+
+        // =========================
+        // SEND TOOL RESULT
+        // =========================
+
+        messages.push({
+
+          role: "tool",
+
+          tool_call_id:
+            toolCall.id,
+
+          content:
+            JSON.stringify(
+              toolResult
+            ),
+        });
+      }
+    }
 
   } catch (error) {
 
     console.error(
-      "\nERROR:\n",
-      error
+      "\n========================="
     );
+
+    console.error(
+      "AGENT ERROR"
+    );
+
+    console.error(
+      "=========================\n"
+    );
+
+    console.error(error);
   }
 }
-
-
 
 main();

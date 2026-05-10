@@ -1,14 +1,13 @@
+ 
 import fs from "fs/promises";
 import path from "path";
 
-import { z } from "zod";
-
 import {
-  Server
+  Server,
 } from "@modelcontextprotocol/sdk/server/index.js";
 
 import {
-  StdioServerTransport
+  StdioServerTransport,
 } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import {
@@ -17,13 +16,50 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 
+// =========================
+// WORKSPACE SETUP
+// =========================
 
 const WORKSPACE_DIR =
   path.resolve("./workspace");
 
 
+// auto create workspace
+await fs.mkdir(
+  WORKSPACE_DIR,
+  {
+    recursive: true,
+  }
+);
+
+
+// =========================
+// SAFE PATH
+// =========================
 
 function safePath(filepath) {
+
+  if (!filepath) {
+    throw new Error(
+      "filepath is required"
+    );
+  }
+
+  // block dangerous paths
+  const blockedPaths = [
+    ".",
+    "/",
+    "../",
+    "..",
+  ];
+
+  if (
+    blockedPaths.includes(filepath)
+  ) {
+    throw new Error(
+      "Dangerous path blocked"
+    );
+  }
 
   const resolved =
     path.resolve(
@@ -43,12 +79,65 @@ function safePath(filepath) {
 }
 
 
+// =========================
+// RECURSIVE FILE LISTING
+// =========================
+
+async function getAllFiles(dir) {
+
+  const entries =
+    await fs.readdir(
+      dir,
+      {
+        withFileTypes: true,
+      }
+    );
+
+  const files = [];
+
+  for (const entry of entries) {
+
+    const fullPath =
+      path.join(
+        dir,
+        entry.name
+      );
+
+    if (entry.isDirectory()) {
+
+      const nestedFiles =
+        await getAllFiles(
+          fullPath
+        );
+
+      files.push(
+        ...nestedFiles
+      );
+
+    } else {
+
+      files.push(
+        path.relative(
+          WORKSPACE_DIR,
+          fullPath
+        )
+      );
+    }
+  }
+
+  return files;
+}
+
+
+// =========================
+// MCP SERVER
+// =========================
 
 const server =
   new Server(
     {
       name: "filesystem-mcp",
-      version: "1.0.0",
+      version: "2.0.0",
     },
     {
       capabilities: {
@@ -56,7 +145,6 @@ const server =
       },
     }
   );
-
 
 
 // =========================
@@ -85,12 +173,11 @@ const tools = [
   },
 
 
-
   {
     name: "write_file",
 
     description:
-      "Write file content",
+      "Write content to a file",
 
     inputSchema: {
       type: "object",
@@ -108,18 +195,45 @@ const tools = [
 
       required: [
         "filepath",
-        "content"
+        "content",
       ],
     },
   },
 
+
+  {
+    name: "append_file",
+
+    description:
+      "Append content to an existing file",
+
+    inputSchema: {
+      type: "object",
+
+      properties: {
+
+        filepath: {
+          type: "string",
+        },
+
+        content: {
+          type: "string",
+        },
+      },
+
+      required: [
+        "filepath",
+        "content",
+      ],
+    },
+  },
 
 
   {
     name: "delete_file",
 
     description:
-      "Delete file",
+      "Delete a file",
 
     inputSchema: {
       type: "object",
@@ -128,19 +242,28 @@ const tools = [
         filepath: {
           type: "string",
         },
+
+        confirm: {
+          type: "boolean",
+
+          description:
+            "Must be true to delete the file",
+        },
       },
 
-      required: ["filepath"],
+      required: [
+        "filepath",
+        "confirm",
+      ],
     },
   },
-
 
 
   {
     name: "list_files",
 
     description:
-      "List workspace files",
+      "List all files in workspace recursively",
 
     inputSchema: {
       type: "object",
@@ -149,7 +272,6 @@ const tools = [
     },
   },
 ];
-
 
 
 // =========================
@@ -168,7 +290,6 @@ server.setRequestHandler(
 );
 
 
-
 // =========================
 // CALL TOOL
 // =========================
@@ -184,16 +305,32 @@ server.setRequestHandler(
     } = request.params;
 
 
-
     try {
 
+      console.error(
+        `\n[TOOL EXECUTION] ${name}`
+      );
+
+      console.error(
+        "Arguments:",
+        args
+      );
+
+
       switch (name) {
+
 
         // =====================
         // READ FILE
         // =====================
 
         case "read_file": {
+
+          if (!args?.filepath) {
+            throw new Error(
+              "filepath required"
+            );
+          }
 
           const fullPath =
             safePath(
@@ -218,21 +355,44 @@ server.setRequestHandler(
         }
 
 
-
         // =====================
         // WRITE FILE
         // =====================
 
         case "write_file": {
 
+          if (!args?.filepath) {
+            throw new Error(
+              "filepath required"
+            );
+          }
+
+          if (
+            typeof args.content !==
+            "string"
+          ) {
+            throw new Error(
+              "content must be string"
+            );
+          }
+
           const fullPath =
             safePath(
               args.filepath
             );
 
+          // auto create folders
+          await fs.mkdir(
+            path.dirname(fullPath),
+            {
+              recursive: true,
+            }
+          );
+
           await fs.writeFile(
             fullPath,
-            args.content
+            args.content,
+            "utf-8"
           );
 
           return {
@@ -248,12 +408,69 @@ server.setRequestHandler(
         }
 
 
+        // =====================
+        // APPEND FILE
+        // =====================
+
+        case "append_file": {
+
+          if (!args?.filepath) {
+            throw new Error(
+              "filepath required"
+            );
+          }
+
+          if (
+            typeof args.content !==
+            "string"
+          ) {
+            throw new Error(
+              "content must be string"
+            );
+          }
+
+          const fullPath =
+            safePath(
+              args.filepath
+            );
+
+          await fs.appendFile(
+            fullPath,
+            args.content,
+            "utf-8"
+          );
+
+          return {
+            content: [
+              {
+                type: "text",
+
+                text:
+                  `Updated file: ${args.filepath}`,
+              },
+            ],
+          };
+        }
+
 
         // =====================
         // DELETE FILE
         // =====================
 
         case "delete_file": {
+
+          if (!args?.filepath) {
+            throw new Error(
+              "filepath required"
+            );
+          }
+
+          // guardrail protection
+          if (!args.confirm) {
+            throw new Error(
+              "Deletion blocked. confirm=true required"
+            );
+          }
 
           const fullPath =
             safePath(
@@ -277,7 +494,6 @@ server.setRequestHandler(
         }
 
 
-
         // =====================
         // LIST FILES
         // =====================
@@ -285,7 +501,7 @@ server.setRequestHandler(
         case "list_files": {
 
           const files =
-            await fs.readdir(
+            await getAllFiles(
               WORKSPACE_DIR
             );
 
@@ -306,6 +522,9 @@ server.setRequestHandler(
         }
 
 
+        // =====================
+        // UNKNOWN TOOL
+        // =====================
 
         default:
 
@@ -316,6 +535,11 @@ server.setRequestHandler(
 
     } catch (error) {
 
+      console.error(
+        "\n[TOOL ERROR]",
+        error
+      );
+
       return {
 
         content: [
@@ -323,7 +547,7 @@ server.setRequestHandler(
             type: "text",
 
             text:
-              error.message,
+              `Tool Error: ${error.message}`,
           },
         ],
 
@@ -332,7 +556,6 @@ server.setRequestHandler(
     }
   }
 );
-
 
 
 // =========================
