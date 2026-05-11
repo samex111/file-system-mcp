@@ -9,12 +9,12 @@ dotenv.config();
 
 
 // =========================
-// OPENAI COMPATIBLE CLIENT
+// NVIDIA OPENAI CLIENT
 // =========================
 
 const openai = new OpenAI({
   apiKey:
-    process.env.NVIDIA_OPEN_AI_API_KEY,
+    process.env.NVIDIA_API_KEY,
 
   baseURL:
     "https://integrate.api.nvidia.com/v1",
@@ -22,11 +22,16 @@ const openai = new OpenAI({
 
 
 // =========================
-// CONFIG
+// MODEL
 // =========================
 
 const MODEL =
-  "mistral-small-4-119b-2603";
+  "qwen/qwen3-coder-480b-a35b-instruct";
+
+
+// =========================
+// SYSTEM PROMPT
+// =========================
 
 const SYSTEM_PROMPT = `
 You are a production-grade MCP filesystem agent.
@@ -34,13 +39,66 @@ You are a production-grade MCP filesystem agent.
 Rules:
 - Use tools whenever required
 - Never hallucinate tool outputs
-- Never output XML
-- Never output DSML
 - Never fake tool execution
 - Always wait for real tool results
 - Keep responses concise
 - Use multiple tools if necessary
+- Return valid tool arguments only
+- Never output XML
+- Never output DSML
 `;
+
+
+// =========================
+// SAFE JSON PARSER
+// =========================
+
+function safeJsonParse(input) {
+
+  try {
+
+    return JSON.parse(input);
+
+  } catch (error) {
+
+    console.error(
+      "\nJSON PARSE ERROR:"
+    );
+
+    console.error(error);
+
+    return null;
+  }
+}
+
+
+// =========================
+// STREAM TEXT
+// =========================
+
+async function streamResponse(stream) {
+
+  let finalText = "";
+
+  for await (const chunk of stream) {
+
+    const delta =
+      chunk.choices?.[0]?.delta;
+
+    // normal text
+    if (delta?.content) {
+
+      process.stdout.write(
+        delta.content
+      );
+
+      finalText +=
+        delta.content;
+    }
+  }
+
+  return finalText;
+}
 
 
 // =========================
@@ -82,7 +140,9 @@ async function main() {
         type: "function",
 
         function: {
-          name: tool.name,
+
+          name:
+            tool.name,
 
           description:
             tool.description || "",
@@ -94,11 +154,11 @@ async function main() {
 
 
     // =========================
-    // USER REQUEST
+    // USER MESSAGE
     // =========================
 
     const userMessage =
-      "create a file named test.txt with content 'Hello World' and then list all files";
+      "create a file named test-5.txt with content 'Hello World this is new ' ";
 
 
     // =========================
@@ -142,6 +202,11 @@ async function main() {
       );
 
 
+      // =========================
+      // NON-STREAM REQUEST
+      // (TOOLS WORK BETTER)
+      // =========================
+
       const completion =
         await openai.chat.completions.create({
 
@@ -152,11 +217,17 @@ async function main() {
           tools:
             openAITools,
 
-          tool_choice: "auto",
+          tool_choice:
+            "auto",
 
-          temperature: 0.2,
+          temperature:
+            0.2,
 
-          max_tokens: 4096,
+          top_p:
+            0.8,
+
+          max_tokens:
+            8192,
         });
 
 
@@ -171,7 +242,7 @@ async function main() {
 
 
       // =========================
-      // NO TOOL CALLS
+      // FINAL RESPONSE
       // =========================
 
       if (!message.tool_calls) {
@@ -188,9 +259,26 @@ async function main() {
           "=========================\n"
         );
 
-        console.log(
-          message.content
+        // STREAM FINAL TEXT
+        const stream =
+          await openai.chat.completions.create({
+
+            model: MODEL,
+
+            messages,
+
+            stream: true,
+
+            temperature: 0.2,
+
+            max_tokens: 8192,
+          });
+
+        await streamResponse(
+          stream
         );
+
+        console.log("\n");
 
         break;
       }
@@ -205,20 +293,16 @@ async function main() {
         const toolName =
           toolCall.function.name;
 
-        let args = {};
-
-        try {
-
-          args = JSON.parse(
-            toolCall
-              .function
-              .arguments
+        const args =
+          safeJsonParse(
+            toolCall.function.arguments
           );
 
-        } catch {
+
+        if (!args) {
 
           console.error(
-            "\nInvalid JSON arguments"
+            "\nInvalid tool arguments"
           );
 
           continue;
@@ -237,10 +321,6 @@ async function main() {
           "=========================\n"
         );
 
-        console.log(
-          "Arguments:"
-        );
-
         console.log(args);
 
 
@@ -251,9 +331,11 @@ async function main() {
         const toolResult =
           await client.callTool({
 
-            name: toolName,
+            name:
+              toolName,
 
-            arguments: args,
+            arguments:
+              args,
           });
 
 
@@ -271,7 +353,7 @@ async function main() {
 
 
         // =========================
-        // SEND TOOL RESULT
+        // APPEND TOOL RESULT
         // =========================
 
         messages.push({
